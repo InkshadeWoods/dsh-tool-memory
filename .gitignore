@@ -1,0 +1,11 @@
+# Node / plugin
+node_modules/
+lib/
+dist/
+*.tsbuildinfo
+*.tgz
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

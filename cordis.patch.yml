@@ -1,0 +1,10 @@
+# dsh-tool-memory 组合包：向 profile 插入插件行。
+
+# 安装后按包名引用，Node 从 node_modules 解析到预构建的 lib/index.js。
+- insert:
+    - id: memory
+      name: dsh-tool-memory
+      config:
+        # root: ''                # 记忆文件目录；默认 $DSH_HOME/memories（DSH_HOME 或 ~/.dsh）
+        # memoryCharLimit: 2200   # MEMORY.md 字符预算（按字符计数，与模型无关）
+        # userCharLimit: 1375     # USER.md 字符预算
