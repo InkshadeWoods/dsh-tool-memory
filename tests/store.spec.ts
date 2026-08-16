@@ -235,7 +235,8 @@ describe('冻结快照', () => {
 })
 
 describe('读失败保护', () => {
-  it('文件存在但不可读时拒绝写入（不把「读不了」当空库）', async () => {
+  // Windows 的 chmodSync 不产生 POSIX 语义的「不可读」，前置条件无法构造，跳过
+  it.skipIf(process.platform === 'win32')('文件存在但不可读时拒绝写入（不把「读不了」当空库）', async () => {
     const store = makeStore()
     await store.add('memory', '已有内容')
     const path = join(storeDir(store), 'MEMORY.md')
@@ -274,6 +275,40 @@ describe('初始化模式（onboarding）', () => {
 
     await store.remove('user', '占位画像')
     expect(store.onboardingPrompt()).toContain('记忆初始化')
+  })
+})
+
+describe('CRLF 行尾兼容（Windows 写入方产生 \\r\\n§\\r\\n 分隔）', () => {
+  it('CRLF 分隔的文件正确切分为多条，而非一整条', () => {
+    const store = makeStore()
+    writeFileSync(join(storeDir(store), 'MEMORY.md'), '第一条CRLF\r\n§\r\n第二条CRLF\r\n§\r\n第三条CRLF', 'utf8')
+    store.loadFromDisk()
+    expect(store.entriesFor('memory')).toEqual(['第一条CRLF', '第二条CRLF', '第三条CRLF'])
+  })
+
+  it('CRLF 文件上 replace 精准命中单条，不把整文件当一条替换', async () => {
+    const store = makeStore()
+    writeFileSync(join(storeDir(store), 'MEMORY.md'), '第一条CRLF\r\n§\r\n第二条CRLF\r\n§\r\n第三条CRLF', 'utf8')
+    const replaced = await store.replace('memory', '第二条', '第二条已更新')
+    expect(replaced.success).toBe(true)
+    expect(store.entriesFor('memory')).toEqual(['第一条CRLF', '第二条已更新', '第三条CRLF'])
+  })
+
+  it('干净的 CRLF 文件不误触发漂移保护；写回统一为 LF', async () => {
+    const store = makeStore()
+    writeFileSync(join(storeDir(store), 'MEMORY.md'), '第一条CRLF\r\n§\r\n第二条CRLF', 'utf8')
+    const removed = await store.remove('memory', '第二条')
+    expect(removed.success).toBe(true) // 若漂移误判，remove 拒写并返回 drift_backup
+    const raw = readFileSync(join(storeDir(store), 'MEMORY.md'), 'utf8')
+    expect(raw).toBe('第一条CRLF')
+    expect(raw.includes('\r')).toBe(false)
+  })
+
+  it('条目内部的 CRLF 多行内容读取时规范化为 LF', () => {
+    const store = makeStore()
+    writeFileSync(join(storeDir(store), 'MEMORY.md'), '多行条目\r\n第二行\r\n§\r\n单行条目', 'utf8')
+    store.loadFromDisk()
+    expect(store.entriesFor('memory')).toEqual(['多行条目\n第二行', '单行条目'])
   })
 })
 

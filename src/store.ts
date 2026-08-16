@@ -121,12 +121,12 @@ function readRawChecked(path: string): { raw: string; ok: boolean } {
   }
 }
 
-/** 解析条目：按分隔符切分、strip、去空。 */
+/** 解析条目：按分隔符切分（兼容 CRLF/LF 行尾——Windows 端写入方可能产生 \r\n§\r\n 分隔）、strip、去空。 */
 export function parseEntries(raw: string): string[] {
   if (!raw.trim()) return []
   return raw
-    .split(ENTRY_DELIMITER)
-    .map(entry => entry.trim())
+    .split(/\r?\n§\r?\n/)
+    .map(entry => entry.replace(/\r\n/g, '\n').trim())
     .filter(entry => entry.length > 0)
 }
 
@@ -452,8 +452,10 @@ export class MemoryStore {
     if (!raw.trim()) return undefined
     const parsed = parseEntries(raw)
     const roundtrip = parsed.join(ENTRY_DELIMITER)
+    // CRLF 原文与规范化（LF）写出格式比较前先统一行尾，否则 CRLF 文件恒判漂移
+    const normalized = raw.trim().replace(/\r\n/g, '\n')
     const maxEntry = parsed.reduce((max, e) => Math.max(max, e.length), 0)
-    const drifted = raw.trim() !== roundtrip || maxEntry > this.charLimit(target)
+    const drifted = normalized !== roundtrip || maxEntry > this.charLimit(target)
     if (!drifted) return undefined
     const bak = `${filePath(this.dir, target)}.bak.${Math.floor(Date.now() / 1000)}`
     try {
