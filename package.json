@@ -26,7 +26,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/InkshadeWoods/dsh-tool-memory.git"
+    "url": "git+https://github.com/sikwoxy/dsh-tool-memory.git"
   },
   "keywords": ["dsh", "deepseek-harness", "plugin", "tool", "memory", "记忆"],
   "license": "MIT",
