@@ -10,6 +10,7 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client": "./lib/client.js",
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
@@ -19,13 +20,13 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && node scripts/build-client.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sikwoxy/dsh-tool-memory.git"
+    "url": "git+https://github.com/InkshadeWoods/dsh-tool-memory.git"
   },
   "keywords": ["dsh", "deepseek-harness", "plugin", "tool", "memory", "记忆"],
   "license": "MIT",
@@ -35,6 +36,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
     }
   },
   "peerDependencies": {

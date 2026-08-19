@@ -17,9 +17,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import Schema from '@deepseek-ai/schemastery'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
-import { HarnessError } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, HarnessError, type UserMessage } from '@deepseek-ai/dsh-llm'
 // 类型导入同时把两个包的模块增强（Context.systemPrompt / 'session/created' 事件）纳入编译作用域。
 import type { PromptSection } from '@deepseek-ai/dsh-system-prompt'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -33,43 +32,19 @@ import {
 } from './store.ts'
 import { renderRefresh, renderShow, renderWrite, text, type ShowStore } from './render.ts'
 import { ReviewScheduler, runReview } from './review.ts'
+import { Config } from './config.ts'
+import { renderRecallContext } from './recall-render.ts'
+import { RecallRuntime } from './recall-runtime.ts'
+import { registerMemorySettingsRoutes } from './settings-routes.ts'
 import type {} from '@deepseek-ai/dsh-subagent' // 让 ctx.subagents 的类型增强进入编译作用域
 import type {} from '@deepseek-ai/dsh-agent' // 让 ctx.agents 的类型增强进入编译作用域
+
+export { Config } from './config.ts'
 
 export const name = 'memory'
 // 'subagents' 必须注入：评审要走 ctx.subagents 程序化拉起子代理（评审约束 1）；
 // 'agents' 用于「session → 当前 agent」反查（评审约束 3）。
 export const inject = ['tools', 'systemPrompt', 'agents', 'subagents']
-
-/**
- * 插件配置。所有字段都有 Schemastery 默认值，加载时必被填充。
- */
-export interface Config {
-  /** 记忆文件目录；留空依次回退环境变量、$DSH_HOME/memories（DSH_HOME 或 ~/.dsh）。 */
-  root: string
-  /** MEMORY.md 字符预算。 */
-  memoryCharLimit: number
-  /** USER.md 字符预算。 */
-  userCharLimit: number
-  /** 每 N 条用户消息自动触发一次后台记忆评审；0=关闭自动评审。 */
-  nudgeInterval: number
-  /** 评审子代理的 provider；留空=主 agent 的 provider。 */
-  reviewProvider: string
-  /** 评审子代理的 model；留空=主 agent 的 model（当前随 provider 默认）。 */
-  reviewModel: string
-  /** 评审完成通知档位：off 不发 / on 简短 / verbose 含条目摘要。 */
-  reviewNotify: 'off' | 'on' | 'verbose'
-}
-
-export const Config: Schema<Config> = Schema.object({
-  root: Schema.string().default(''),
-  memoryCharLimit: Schema.number().default(2200),
-  userCharLimit: Schema.number().default(1375),
-  nudgeInterval: Schema.number().default(10).min(0),
-  reviewProvider: Schema.string().default(''),
-  reviewModel: Schema.string().default(''),
-  reviewNotify: Schema.union(['off', 'on', 'verbose']).default('on'),
-})
 
 function resolveRoot(config: Config): string {
   if (config.root) return config.root
@@ -81,6 +56,20 @@ const OBJECT_OUTPUT = { type: 'object', additionalProperties: true } as const
 
 type JsonObjectValue = Record<string, JsonValue>
 
+function isRecallMode(config: Config): boolean {
+  return config.injectionMode === 'recall'
+}
+
+/** 只把本轮真实用户的可见文本用作检索查询，不让插件或工具消息触发召回。 */
+function currentUserPrompt(messages: readonly UserMessage[]): string {
+  return messages
+    .filter(message => message.source.kind === 'user')
+    .flatMap(message => message.content)
+    .flatMap(block => block.type === 'text' ? [block.text] : [])
+    .join('\n')
+    .trim()
+}
+
 /** 记忆工具失败统一抛 HarnessError：message 即模型可见的失败详情。 */
 function throwIfFailed(result: StoreResult): void {
   if (!result.success) {
@@ -88,8 +77,12 @@ function throwIfFailed(result: StoreResult): void {
   }
 }
 
-export function apply(ctx: Context, config: Config) {
+export function apply(ctx: Context, rawConfig: Config) {
+  // 已安装 profile 可能来自旧版配置，缺少后续新增字段；入口统一通过 schema
+  // 补齐默认值，避免 host 路由或运行时因 undefined 失效。
+  const config = Config(rawConfig)
   const root = resolveRoot(config)
+  const recallRuntime = new RecallRuntime()
   const store = new MemoryStore(root, {
     memoryCharLimit: config.memoryCharLimit,
     userCharLimit: config.userCharLimit,
@@ -106,12 +99,12 @@ export function apply(ctx: Context, config: Config) {
   const notesSection: PromptSection = {
     name: 'memory:notes',
     order: 60,
-    text: () => store.snapshotText('memory'),
+    text: () => isRecallMode(config) ? '' : store.snapshotText('memory'),
   }
   const profileSection: PromptSection = {
     name: 'memory:profile',
     order: 61,
-    text: () => store.snapshotText('user'),
+    text: () => isRecallMode(config) ? '' : store.snapshotText('user'),
   }
   const onboardingSection: PromptSection = {
     name: 'memory:onboarding',
@@ -121,6 +114,52 @@ export function apply(ctx: Context, config: Config) {
   ctx.systemPrompt.section(notesSection)
   ctx.systemPrompt.section(profileSection)
   ctx.systemPrompt.section(onboardingSection)
+
+  // 智能模式使用当前 turn 的首次有效 step 注入；工具连续 step 不重复检索。
+  // 必须先 next()，以便尊重其他 waterfall listener 的 reject/替换结果。
+  ctx.on('agent/pre-step', async ({ agent, messages, step, signal }, next) => {
+    const decision = await next()
+    if (decision.kind === 'reject' || signal.aborted || step !== 1 || !isRecallMode(config)) return decision
+
+    const query = currentUserPrompt(messages)
+    if (!query) return decision
+    try {
+      store.refresh()
+      const recalled = await recallRuntime.recall({
+        userEntries: store.entriesFor('user'),
+        memoryEntries: store.entriesFor('memory'),
+        query,
+        sessionId: agent.session.header.id,
+        embeddingEnabled: config.recallEmbeddingEnabled,
+        embeddingOptions: {
+          baseUrl: config.recallEmbeddingBaseUrl,
+          apiKey: config.recallEmbeddingApiKey,
+          model: config.recallEmbeddingModel,
+        },
+      })
+      signal.throwIfAborted()
+      const rendered = renderRecallContext({
+        coreEntries: recalled.coreEntries,
+        hits: recalled.hits,
+        options: {
+          topK: config.recallTopK,
+          maxChars: config.recallMaxChars,
+          perItemChars: config.recallPerItemChars,
+        },
+      })
+      if (!rendered.text) return decision
+
+      const context = createUserMessage({
+        content: [{ type: 'text', text: rendered.text }],
+        source: { kind: 'plugin', plugin: 'memory-recall', form: 'recall' },
+      })
+      recallRuntime.recordInjectedEntries(agent.session.header.id, rendered.injectedEntries)
+      return { kind: 'enter', messages: [...decision.messages, context] }
+    } catch {
+      // 共享文件、检索、渲染或取消异常都只能让本轮少一段上下文，不能阻塞请求。
+      return decision
+    }
+  }, { global: true })
 
   // ── 工具注册 ──────────────────────────────────────────────────────
 
@@ -154,12 +193,17 @@ export function apply(ctx: Context, config: Config) {
 
   ctx.tools.register(defineTool({
     name: 'memory_add',
-    description: '向记忆追加一条（默认 memory=我的笔记；user=用户画像）。内容会跨会话保留，应写环境事实、项目约定、用户偏好等值得长期记住的信息。超字符预算会返回合并引导错误：请先用 memory_replace/memory_remove 腾出空间，再重试。',
+    description: '向记忆追加一条（默认 memory=我的笔记；user=用户画像）。内容会跨会话保留，应写环境事实、项目约定、用户偏好等值得长期记住的信息。metadata 为可选的条目内字段；未传时保持纯文本旧格式。无论何种格式都只写入一个 § 条目。超字符预算会返回合并引导错误：请先用 memory_replace/memory_remove 腾出空间，再重试。',
     parameters: {
       content: { type: 'string', required: true, description: '要记住的内容（一条）' },
       target: {
         type: 'string', enum: ['memory', 'user'],
         description: '写入哪个存储；默认 memory',
+      },
+      metadata: {
+        type: 'object',
+        additionalProperties: true,
+        description: '可选：id/kind/inject/priority/status/scope/tags/updated_at/valid_until/supersedes/summary',
       },
     },
     output: {
@@ -167,7 +211,7 @@ export function apply(ctx: Context, config: Config) {
       render: (_args, value) => text(renderWrite(value)),
     },
     async execute(args) {
-      const result = await store.add(args.target ?? 'memory', args.content)
+      const result = await store.add(args.target ?? 'memory', args.content, args.metadata)
       throwIfFailed(result)
       return {
         target: args.target ?? 'memory',
@@ -186,7 +230,7 @@ export function apply(ctx: Context, config: Config) {
 
   ctx.tools.register(defineTool({
     name: 'memory_replace',
-    description: '用新内容替换「包含 old_text 子串」的那条记忆。old_text 用该条目的短唯一子串（不必全文）；匹配到多条不同条目会报歧义，请更具体。替换后总占用超预算会返回合并引导错误。',
+    description: '用新内容替换「包含 old_text 子串」的那条记忆。old_text 用该条目的短唯一子串（不必全文）；匹配到多条不同条目会报歧义，请更具体。未传 metadata 时，既有结构化条目会保留其原 metadata；传入 metadata 则以新字段覆盖。',
     parameters: {
       old_text: { type: 'string', required: true, description: '目标条目的短唯一子串' },
       new_content: { type: 'string', required: true, description: '替换后的新内容' },
@@ -194,13 +238,18 @@ export function apply(ctx: Context, config: Config) {
         type: 'string', enum: ['memory', 'user'],
         description: '操作哪个存储；默认 memory',
       },
+      metadata: {
+        type: 'object',
+        additionalProperties: true,
+        description: '可选：写入新条目的内部元数据；省略时保留原结构化条目的 metadata',
+      },
     },
     output: {
       schema: OBJECT_OUTPUT,
       render: (_args, value) => text(renderWrite(value)),
     },
     async execute(args) {
-      const result = await store.replace(args.target ?? 'memory', args.old_text, args.new_content)
+      const result = await store.replace(args.target ?? 'memory', args.old_text, args.new_content, args.metadata)
       throwIfFailed(result)
       return {
         target: args.target ?? 'memory',
@@ -243,11 +292,11 @@ export function apply(ctx: Context, config: Config) {
 
   ctx.tools.register(defineTool({
     name: 'memory_batch',
-    description: '原子批量修改记忆：一次调用完成多个 add/replace/remove（如「删旧的 + 加新的」）。对最终预算校验，all-or-nothing：任一操作非法、不匹配或最终超限，什么都不写。',
+    description: '原子批量修改记忆：一次调用完成多个 add/replace/remove（如「删旧的 + 加新的」）。add/replace 可带 metadata；replace 未带 metadata 时保留原结构化条目的 metadata。对最终预算校验，all-or-nothing：任一操作非法、不匹配或最终超限，什么都不写。',
     parameters: {
       operations: {
         type: 'array', required: true,
-        description: '操作序列：{action: add|replace|remove, content?, old_text?}（action 必填；add/replace 需 content，replace/remove 需 old_text）',
+        description: '操作序列：{action: add|replace|remove, content?, old_text?, metadata?}（action 必填；add/replace 需 content，replace/remove 需 old_text）',
         items: { type: 'object', additionalProperties: true },
       },
       target: {
@@ -310,5 +359,15 @@ export function apply(ctx: Context, config: Config) {
   }, { global: true })
   ctx.on('session/disposed', (session: Session) => {
     scheduler.onSessionDisposed(session)
+    recallRuntime.clearSession(session.header.id)
   }, { global: true })
+
+  // ── 设置面板 host 路由（web profile 下可用）───────────────────────
+  // webServer 服务延迟注入：headless/CLI profile 缺该服务时插件本体不受影响。
+  ctx.inject(['webServer'], (webCtx) => {
+    webCtx.effect(() => registerMemorySettingsRoutes(webCtx, config, store, recallRuntime), 'memory: settings routes')
+  })
 }
+
+// DSH 的动态加载器读取模块默认导出；同时保留具名导出供源码使用。
+export default { name, inject, apply }

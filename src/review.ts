@@ -23,7 +23,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import type { MemoryStore, MemoryTarget } from './store.ts'
@@ -92,6 +92,23 @@ function clip(text: string, limit = REVIEW_BODY_LIMIT): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}…`
 }
 
+/**
+ * 仅识别本插件在 recall 模式插入的上下文消息。
+ *
+ * 不能按 user role 或 plugin source 泛化过滤：其他插件通知、技能上下文和真实
+ * 用户消息都仍是评审链路的既有输入；`form: recall` 防止同插件未来的其他消息误伤。
+ */
+export function isMemoryRecallMessage(message: UserMessage): boolean {
+  return message.source.kind === 'plugin' &&
+    message.source.plugin === 'memory-recall' &&
+    message.source.form === 'recall'
+}
+
+function isReviewableEvent(event: SessionEvent): boolean {
+  return event.type === 'assistant/message' ||
+    (event.type === 'user/message' && !isMemoryRecallMessage(event.data))
+}
+
 function transcribe(event: SessionEvent): string {
   switch (event.type) {
     case 'user/message':
@@ -117,7 +134,7 @@ function transcribe(event: SessionEvent): string {
  * 纯工具回合（tool/call、tool/result）不进入转写——评审的信息来源是用户消息。
  */
 export function buildReviewInput(events: readonly SessionEvent[]): string {
-  const messages = events.filter(event => event.type === 'user/message' || event.type === 'assistant/message')
+  const messages = events.filter(isReviewableEvent)
   const total = messages.length
   const window = messages.slice(-REVIEW_WINDOW)
   const lines: string[] = []
@@ -360,7 +377,9 @@ interface SessionReviewState {
 
 function countUserMessages(events: readonly SessionEvent[]): number {
   let count = 0
-  for (const event of events) if (event.type === 'user/message') count += 1
+  for (const event of events) {
+    if (event.type === 'user/message' && !isMemoryRecallMessage(event.data)) count += 1
+  }
   return count
 }
 
@@ -375,7 +394,7 @@ export class ReviewScheduler {
    */
   onSessionEvent(session: Session, event: SessionEvent): void {
     if (this.options.nudgeInterval <= 0) return
-    if (event.type !== 'user/message') return
+    if (event.type !== 'user/message' || isMemoryRecallMessage(event.data)) return
     const state = this.stateFor(session)
     state.count += 1
     if (state.count % this.options.nudgeInterval !== 0) return

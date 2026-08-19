@@ -2,8 +2,8 @@
 
 > 把 [Hermes Agent 的 memory 工具](https://github.com/NousResearch/hermes-agent/blob/main/tools/memory_tool.py)
 > 的机制移植到 DeepSeek Harness：**有界、纯文本、跨会话**的记忆。
-> 插件加载与每个新会话开始时，把记忆以**冻结快照**注入 system prompt；
-> 会话中途的写入立即落盘，但不改变 system prompt——保住 LLM prefix cache。
+> `MEMORY.md` 与 `USER.md` 是唯一的持久化真源；可在设置页选择传统**冻结快照**
+> 或低噪声的**智能动态召回**。默认保持冻结快照，现有工作流不变。
 
 ## 记忆机制（与 Hermes 对齐）
 
@@ -13,7 +13,7 @@
 | 条目格式 | `§` 分隔的纯文本列表，可多行 | 同左（分隔符 `\n§\n`，与 Hermes 逐字符一致） |
 | 两个存储 | MEMORY=代理笔记；USER=用户画像 | 同左 |
 | 字符预算 | 2200 / 1375 字符（按字符数，模型无关） | 同左（可用配置覆盖） |
-| 冻结快照 | 会话开始时注入 system prompt；中途写入不改快照 | 同左：插件加载 + `session/created` 时重建快照，经 `ctx.systemPrompt.section()` 注入 |
+| 注入策略 | 会话开始时注入完整记忆 | 默认 `snapshot`：插件加载 + `session/created` 时重建完整快照；可选 `recall`：每轮仅注入相关条目与 USER 长期核心 |
 | 工具面 | 单工具 `memory` + `action` 参数 | DSH 惯例拆分：`memory_add/replace/remove/batch/show/refresh` |
 | 定位 | replace/remove 用短唯一子串匹配，非 ID | 同左；歧义报错引导更具体 |
 | 预算超限 | 返回合并引导错误（列出当前条目），本轮内合并后重试 | 同左（错误信息含条目清单与占用） |
@@ -110,7 +110,7 @@ dsh plugin add dsh-tool-memory
 
 ## 插件配置
 
-在 profile / 组合包层的 `cordis.patch.yml` 中按需覆盖：
+在 profile / 组合包层的 `cordis.patch.yml` 中按需覆盖，也可在 DSH 的“设置 → 记忆”页面用两张模式卡片保存：
 
 ```yaml
 - id: memory
@@ -123,7 +123,27 @@ dsh plugin add dsh-tool-memory
     reviewProvider: ''              # 评审子代理的 LLM provider（路由）；留空=主 agent 的
     reviewModel: ''                 # 评审子代理的 LLM model；留空=主 agent 的
     reviewNotify: 'on'              # 评审完成通知：off / on / verbose
+    injectionMode: 'snapshot'       # snapshot=传统冻结快照（默认）；recall=智能动态召回
+    recallTopK: 3                   # recall 最多注入的动态记忆条数（1–6）
+    recallMaxChars: 1200            # recall 动态记忆总字符预算（200–4000）
+    recallPerItemChars: 420         # recall 单条动态记忆预算（80–1200）
+    recallEmbeddingEnabled: false   # 可选语义增强；默认关闭，不主动发起网络请求
+    recallEmbeddingBaseUrl: 'https://api-inference.modelscope.cn/v1' # OpenAI 兼容 embedding API 根地址
+    recallEmbeddingApiKey: ''       # 本机 profile 保存的 API Key；不要提交或共享此配置文件
+    recallEmbeddingModel: 'Qwen/Qwen3-Embedding-8B' # 请求中的 embedding 模型标识
 ```
+
+### 智能动态召回
+
+选择 `injectionMode: 'recall'` 后，插件会在每个真实用户请求的首次模型 step 中重新读取两份共享文件：
+
+- `USER.md` 中同时标记为 `always / permanent / active / global` 的合法核心条目会常驻；
+- 其余有效条目经词法、内存 BM25、短语/标签和 RRF 选择，未通过强证据门控时不注入任何动态记忆；
+- `never`、`superseded`、`archived` 或已过 `valid_until` 的条目不会参与；
+- 结果受条数和字符预算限制，历史威胁条目会显示屏蔽占位符；
+- 可选 embedding 语义增强默认关闭。设置页可填写 OpenAI 兼容的 Base URL、API Key 与模型名；API Key 只保存在本机 profile 配置中，状态 API、运行状态和日志均不返回该值。缺少密钥、超时或服务失败均会自动回退到本地检索；不创建向量数据库或其他持久化索引。
+
+动态上下文以 `memory-recall` 插件来源标记，后台记忆评审会自动排除它，不会把注入文本再次沉淀为记忆。
 
 ## 记忆文件格式
 

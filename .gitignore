@@ -9,3 +9,13 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+
+# Local runtime / development artifacts
+.mimosa/
+.spec-workflow/
+
+# Personal shared-memory files must never be committed from this repository.
+/MEMORY.md
+/USER.md
+/MEMORY.md.bak.*
+/USER.md.bak.*

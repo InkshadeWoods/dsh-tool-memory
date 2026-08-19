@@ -8,3 +8,11 @@
         # root: ''                # 记忆文件目录；默认 $DSH_HOME/memories（DSH_HOME 或 ~/.dsh）
         # memoryCharLimit: 2200   # MEMORY.md 字符预算（按字符计数，与模型无关）
         # userCharLimit: 1375     # USER.md 字符预算
+        # injectionMode: 'snapshot' # snapshot=传统冻结快照；recall=智能动态召回
+        # recallTopK: 3             # 智能模式最多注入的动态记忆条数（1–6）
+        # recallMaxChars: 1200      # 智能模式动态记忆总字符预算（200–4000）
+        # recallPerItemChars: 420   # 智能模式单条动态记忆预算（80–1200）
+        # recallEmbeddingEnabled: false # 语义 embedding 增强；默认关闭，不主动联网
+        # recallEmbeddingBaseUrl: 'https://api-inference.modelscope.cn/v1' # OpenAI 兼容 embedding API 根地址
+        # recallEmbeddingApiKey: ''    # 本机保存的 embedding API Key；不要提交或共享此配置文件
+        # recallEmbeddingModel: 'Qwen/Qwen3-Embedding-8B' # embedding 模型标识

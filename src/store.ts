@@ -25,6 +25,12 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { firstThreatMessage, scanThreats } from './threat.ts'
+import {
+  parseMemoryEntryMetadata,
+  replaceMemoryEntryBody,
+  serializeMemoryEntry,
+  type MemoryEntryMetadataInput,
+} from './memory-entry.ts'
 
 export type MemoryTarget = 'memory' | 'user'
 
@@ -43,6 +49,8 @@ export interface BatchOperation {
   content?: string
   /** replace/remove 要匹配的短唯一子串。 */
   old_text?: string
+  /** 可选条目内 metadata；仅 add / replace 使用。 */
+  metadata?: unknown
 }
 
 /** 工具返回的规范结果；success=false 时由插件层转为 HarnessError 抛给模型。 */
@@ -258,19 +266,22 @@ export class MemoryStore {
 
   /**
    * 追加一条。超出预算返回合并引导错误；重复条目幂等返回成功。
-   * append-only 路径跳过漂移保护（追加不会覆盖既有内容）。
+   * 写入前和其他修改路径一致地执行漂移保护；虽然语义上是追加，实际落盘
+   * 仍会原子重写整个文件，不能把共享端的非规范编辑静默规范化。
    */
-  add(target: MemoryTarget, content: string): Promise<StoreResult> {
+  add(target: MemoryTarget, content: string, metadata?: unknown): Promise<StoreResult> {
     return this.withLock(async () => {
-      const clean = content.trim()
-      if (!clean) return fail('内容不能为空。')
+      const prepared = prepareEntryContent(target, content, metadata)
+       if (!prepared.ok) return fail(prepared.error)
+      const clean = prepared.content
 
       const threat = firstThreatMessage(clean)
       if (threat) return fail(threat)
 
       // 锁内重新读盘，拾取其他会话的写入；不可读则拒绝（绝不把「读不了」当「空」覆写）。
-      const reload = this.reloadTarget(target, { skipDrift: true })
+      const reload = this.reloadTarget(target)
       if (!reload.ok) return readFailedResult(filePath(this.dir, target))
+      if (reload.driftBackup) return driftResult(reload.driftBackup)
 
       const entries = this.entriesFor(target)
       if (entries.includes(clean)) {
@@ -292,15 +303,10 @@ export class MemoryStore {
   }
 
   /** 用新内容替换「包含 oldText 子串」的条目。 */
-  replace(target: MemoryTarget, oldText: string, newContent: string): Promise<StoreResult> {
+  replace(target: MemoryTarget, oldText: string, newContent: string, metadata?: unknown): Promise<StoreResult> {
     return this.withLock(async () => {
       const oldTextClean = oldText.trim()
-      const newClean = newContent.trim()
       if (!oldTextClean) return fail("replace 需要 old_text（要替换条目的短唯一子串）。")
-      if (!newClean) return fail('new_content 不能为空；删除条目请用 remove。')
-
-      const threat = firstThreatMessage(newClean)
-      if (threat) return fail(threat)
 
       const reload = this.reloadTarget(target)
       if (!reload.ok) return readFailedResult(filePath(this.dir, target))
@@ -312,6 +318,11 @@ export class MemoryStore {
       if (matched.multiple) return this.multipleMatchError(target, matched.matches, 'replace')
 
       const idx = matched.index
+      const prepared = prepareReplacementContent(target, entries[idx]!, newContent, metadata)
+       if (!prepared.ok) return fail(prepared.error)
+      const newClean = prepared.content
+      const threat = firstThreatMessage(newClean)
+      if (threat) return fail(threat)
       const test = [...entries]
       test[idx] = newClean
       const total = test.join(ENTRY_DELIMITER).length
@@ -367,10 +378,7 @@ export class MemoryStore {
         if (op.action !== 'add' && op.action !== 'replace' && op.action !== 'remove') {
           return fail(`第 ${i + 1} 个操作：未知 action（应为 add/replace/remove）。`)
         }
-        if ((op.action === 'add' || op.action === 'replace') && op.content?.trim()) {
-          const threat = firstThreatMessage(op.content.trim())
-          if (threat) return fail(`第 ${i + 1} 个操作：${threat}`)
-        }
+        if ((op.action === 'add' || op.action === 'replace') && !op.content?.trim()) return fail(`第 ${i + 1} 个操作：content 必填。`)
       }
 
       const reload = this.reloadTarget(target)
@@ -381,20 +389,28 @@ export class MemoryStore {
       const limit = this.charLimit(target)
       for (const [i, op] of operations.entries()) {
         const pos = `第 ${i + 1} 个操作（${op.action}）`
-        const content = (op.content ?? '').trim()
+        const content = op.content ?? ''
         const oldText = (op.old_text ?? '').trim()
 
         if (op.action === 'add') {
           if (!content) return this.batchError(target, `${pos}：content 必填。`, working)
-          if (working.includes(content)) continue // 幂等：重复添加跳过，不使整批失败
-          working.push(content)
+          const prepared = prepareEntryContent(target, content, op.metadata)
+          if (!prepared.ok) return this.batchError(target, `${pos}：${prepared.error}`, working)
+          const threat = firstThreatMessage(prepared.content)
+          if (threat) return this.batchError(target, `${pos}：${threat}`, working)
+          if (working.includes(prepared.content)) continue // 幂等：重复添加跳过，不使整批失败
+          working.push(prepared.content)
         } else if (op.action === 'replace') {
           if (!oldText) return this.batchError(target, `${pos}：old_text 必填。`, working)
           if (!content) return this.batchError(target, `${pos}：content 必填（删除用 remove）。`, working)
           const matched = matchEntries(working, oldText)
           if (!matched) return this.batchError(target, `${pos}：没有条目匹配「${oldText}」。`, working)
           if (matched.multiple) return this.batchError(target, `${pos}：「${oldText}」匹配多个不同条目，请更具体。`, working)
-          working[matched.index] = content
+          const prepared = prepareReplacementContent(target, working[matched.index]!, content, op.metadata)
+          if (!prepared.ok) return this.batchError(target, `${pos}：${prepared.error}`, working)
+          const threat = firstThreatMessage(prepared.content)
+          if (threat) return this.batchError(target, `${pos}：${threat}`, working)
+          working[matched.index] = prepared.content
         } else {
           if (!oldText) return this.batchError(target, `${pos}：old_text 必填。`, working)
           const matched = matchEntries(working, oldText)
@@ -519,6 +535,50 @@ export class MemoryStore {
 
 function fail(error: string): StoreResult {
   return { success: false, error }
+}
+
+type PreparedEntry = { ok: true; content: string } | { ok: false; error: string }
+
+/**
+ * 所有写入路径共享 metadata 校验与 § 单条边界检查，避免后台评审或 batch
+ * 绕过工具层。`always` 只允许合法 USER 核心，和 ZCode 的共享协议一致。
+ */
+function prepareEntryContent(target: MemoryTarget, content: string, metadata: unknown): PreparedEntry {
+  const parsedMetadata = parseMemoryEntryMetadata(metadata)
+  if (parsedMetadata.error !== undefined) return { ok: false, error: parsedMetadata.error }
+  const typedMetadata: MemoryEntryMetadataInput | undefined = parsedMetadata.metadata
+  if (typedMetadata?.inject === 'always') {
+    const coreKinds = new Set(['identity', 'preference', 'workflow', 'safety'])
+    if (
+      target !== 'user' ||
+      typedMetadata.priority !== 'permanent' ||
+      typedMetadata.status !== 'active' ||
+      typedMetadata.scope !== 'global' ||
+      !coreKinds.has(typedMetadata.kind ?? '')
+    ) {
+      return { ok: false, error: 'inject: always 仅允许写入 USER.md，且必须同时使用 priority: permanent、status: active、scope: global 和合法核心 kind。' }
+    }
+  }
+  return toPreparedEntry(serializeMemoryEntry(content, typedMetadata))
+}
+
+/** 未显式提供 metadata 的结构化替换保留原 header；显式 metadata 则完整覆盖。 */
+function prepareReplacementContent(
+  target: MemoryTarget,
+  existing: string,
+  content: string,
+  metadata: unknown,
+): PreparedEntry {
+  const parsedMetadata = parseMemoryEntryMetadata(metadata)
+  if (parsedMetadata.error !== undefined) return { ok: false, error: parsedMetadata.error }
+  if (parsedMetadata.metadata === undefined) return toPreparedEntry(replaceMemoryEntryBody(existing, content))
+  return prepareEntryContent(target, content, parsedMetadata.metadata)
+}
+
+function toPreparedEntry(entry: ReturnType<typeof serializeMemoryEntry>): PreparedEntry {
+  return entry.content === undefined
+    ? { ok: false, error: entry.error ?? '记忆条目序列化失败。' }
+    : { ok: true, content: entry.content }
 }
 
 function readFailedResult(path: string): StoreResult {
