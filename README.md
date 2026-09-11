@@ -5,6 +5,11 @@
 > `MEMORY.md` 与 `USER.md` 是唯一的持久化真源；可在设置页选择传统**冻结快照**
 > 或低噪声的**智能动态召回**。默认保持冻结快照，现有工作流不变。
 
+## 兼容性
+
+- 实测兼容 **DSH `0.1.5-rc.2`**（`tools` / `systemPrompt` / `agents` / `subagents` / 会话事件 / `agent/pre-step` 全链路 API 核验通过；宿主判定见 `package.json` 的 `engines.dsh: ">=0.1.1-rc.2"`）。
+- 依赖锚定 `@deepseek-ai/* 0.1.0-rc.6`：本插件只使用 DSH 最稳定的 API 子集，因此同一份产物可同时兼容旧版宿主与 `0.1.5-rc.2`。
+
 ## 记忆机制（与 Hermes 对齐）
 
 | 机制 | Hermes | 本插件（DSH） |
