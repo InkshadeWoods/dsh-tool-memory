@@ -10,13 +10,21 @@ import type { RecallRuntimeHit } from './recall-runtime.ts'
 import { tokenize } from './retrieval.ts'
 import { scanThreats } from './threat.ts'
 
-const DEFAULT_TOP_K = 3
-const DEFAULT_DYNAMIC_MAX_CHARS = 1200
-const DEFAULT_DYNAMIC_PER_ITEM_CHARS = 420
+const DEFAULT_TOP_K = 6
+const DEFAULT_DYNAMIC_MAX_CHARS = 0
+const DEFAULT_DYNAMIC_PER_ITEM_CHARS = 0
 const DEFAULT_CORE_MAX_CHARS = 300
 const DEFAULT_CORE_PER_ITEM_CHARS = 160
-const MAX_KIND_ENTRIES = 2
 const SIMILARITY_LIMIT = 0.75
+/**
+ * 条数上限的兜底天花板。真实上限由 RecallRuntime 按当前动态池实际条目数夹取
+ * （池里只有 5 条时不可能注入 6 条），这里只防止异常配置导致一次注入过多。
+ */
+const MAX_RECALL_TOP_K = 20
+/** 单条渲染的最小可读长度：低于此值的截断只留残片，不如整条跳过。 */
+const MIN_MEANINGFUL_TRUNCATION = 80
+/** 剩余预算低于此值时不再截断塞入，避免产出无意义残片。 */
+const MIN_REMAINING_TO_TRUNCATE = 200
 
 export interface RecallRenderOptions {
   topK?: number
@@ -42,18 +50,21 @@ export interface RecallRenderResult {
 /** 渲染常驻核心和与本轮相关的动态条目；两者皆为空时返回空字符串。 */
 export function renderRecallContext(input: RecallRenderInput): RecallRenderResult {
   const options = input.options ?? {}
-  const topK = bounded(options.topK, DEFAULT_TOP_K, 1, 6)
+  const topK = bounded(options.topK, DEFAULT_TOP_K, 1, MAX_RECALL_TOP_K)
   const dynamicEntries = selectDiverseEntries(input.hits, topK)
   const coreEntries = uniqueEntries(input.coreEntries)
   const coreLines = renderWithinBudget(
     coreEntries,
-    bounded(options.coreMaxChars, DEFAULT_CORE_MAX_CHARS, 80, 1200),
-    bounded(options.corePerItemChars, DEFAULT_CORE_PER_ITEM_CHARS, 40, 500),
+    // 0 = 不设总字符上限
+    options.coreMaxChars === undefined ? DEFAULT_CORE_MAX_CHARS : Math.max(0, options.coreMaxChars),
+    options.corePerItemChars === undefined ? DEFAULT_CORE_PER_ITEM_CHARS : Math.max(0, options.corePerItemChars),
   )
   const dynamicLines = renderWithinBudget(
     dynamicEntries,
-    bounded(options.maxChars, DEFAULT_DYNAMIC_MAX_CHARS, 200, 4000),
-    bounded(options.perItemChars, DEFAULT_DYNAMIC_PER_ITEM_CHARS, 80, 1200),
+    // 0 = 不设总字符上限（默认行为：动态区零截断）
+    options.maxChars === undefined ? DEFAULT_DYNAMIC_MAX_CHARS : Math.max(0, options.maxChars),
+    // 0 = 不设单条字符上限（默认行为：单条零截断）
+    options.perItemChars === undefined ? DEFAULT_DYNAMIC_PER_ITEM_CHARS : Math.max(0, options.perItemChars),
   )
   const renderedCore = coreLines.entries
   const renderedDynamic = dynamicLines.entries
@@ -78,21 +89,28 @@ export function renderRecallContext(input: RecallRenderInput): RecallRenderResul
   }
 }
 
-/** RRF 顺序下按条目键、正文近似度和 kind 分布过滤重复候选。 */
+/**
+ * 在 RRF 顺序下过滤重复候选。
+ *
+ * 去重全部基于内容：条目键、正文全等、正文 Jaccard 近似度。
+ * 早期还有一道按 kind 的条数限流（MAX_KIND_ENTRIES），已移除——kind 来自
+ * 条目元数据，而缺元数据的旧格式条目一律落到 unknown（实测占半数以上），
+ * 在该字段上设限等于对最不可靠的分类做最狠的裁剪，挡掉的往往是同一功能
+ * 不同侧面的事实（如 deepseek-web 的截断根因 / 凭据穿透 / 解析器续篇），
+ * 与语义召回「把相关的都找回来」的目标相反。内容层面重复的条目已由
+ * jaccardSimilarity 拦住，无需再用元数据二次裁剪。
+ */
 function selectDiverseEntries(hits: readonly RecallRuntimeHit[], limit: number): MemoryEntry[] {
   const selected: MemoryEntry[] = []
   const seenKeys = new Set<string>()
   const normalizedBodies = new Set<string>()
-  const kindCounts = new Map<string, number>()
   for (const { entry } of hits) {
     const normalized = entry.body.replace(/\s+/g, ' ').trim().toLowerCase()
     if (!normalized || seenKeys.has(entry.key) || normalizedBodies.has(normalized)) continue
-    if ((kindCounts.get(entry.kind) ?? 0) >= MAX_KIND_ENTRIES) continue
     if (selected.some(existing => jaccardSimilarity(existing.body, entry.body) >= SIMILARITY_LIMIT)) continue
     selected.push(entry)
     seenKeys.add(entry.key)
     normalizedBodies.add(normalized)
-    kindCounts.set(entry.kind, (kindCounts.get(entry.kind) ?? 0) + 1)
     if (selected.length >= limit) break
   }
   return selected
@@ -109,25 +127,44 @@ function uniqueEntries(entries: readonly MemoryEntry[]): MemoryEntry[] {
   return unique
 }
 
+/**
+ * 按字符预算渲染条目。
+ *
+ * totalBudget / perItemChars 为 0 时表示不设该项上限，此时仅由调用方的条数
+ * 上限决定注入多少条，且任何单条都不被截断——半条记忆会让模型读到错误前提，
+ * 比不注入更危险，因此默认策略是「要么完整，要么不注入」。
+ *
+ * 设了上限时分两阶段：
+ *   阶段一 只装入「完整放得下」的条目。长条目即使排在前面也不会被提前截断，
+ *         因而不会挤掉后面本可完整注入的短条目。
+ *   阶段二 用剩余零头截断装入第一条还没装的条目；剩余空间连一条残片都装不下
+ *         （< MIN_REMAINING_TO_TRUNCATE）就整条放弃，不产出无意义残片。
+ */
 function renderWithinBudget(entries: readonly MemoryEntry[], totalBudget: number, perItemChars: number): { lines: string[]; entries: MemoryEntry[] } {
   const lines: string[] = []
   const renderedEntries: MemoryEntry[] = []
+  const noTotalCap = totalBudget <= 0
+  const noItemCap = perItemChars <= 0
+  const rendered = new Map<MemoryEntry, string>()
   let used = 0
+  // 阶段一：完整优先。顺序由调用方（RRF）决定，此处不改排序。
   for (const entry of entries) {
-    const line = renderEntry(entry, perItemChars)
-    if (used + line.length > totalBudget) {
-      const remaining = totalBudget - used
-      if (renderedEntries.length === 0 && remaining >= 80) {
-        lines.push(truncate(line, remaining))
-        renderedEntries.push(entry)
-        used = totalBudget
-      }
-      continue
+    const line = renderEntry(entry, noItemCap ? Number.POSITIVE_INFINITY : perItemChars)
+    rendered.set(entry, line)
+    if (noTotalCap || used + line.length <= totalBudget) {
+      lines.push(line)
+      renderedEntries.push(entry)
+      used += line.length
     }
-    lines.push(line)
-    renderedEntries.push(entry)
-    used += line.length
   }
+  if (noTotalCap || used >= totalBudget) return { lines, entries: renderedEntries }
+  // 阶段二：剩余零头只用于截断第一条尚未装入的条目。
+  const remaining = totalBudget - used
+  if (remaining < MIN_REMAINING_TO_TRUNCATE) return { lines, entries: renderedEntries }
+  const pending = entries.find(entry => !renderedEntries.includes(entry) && rendered.has(entry))
+  if (!pending) return { lines, entries: renderedEntries }
+  lines.push(truncate(rendered.get(pending) as string, remaining))
+  renderedEntries.push(pending)
   return { lines, entries: renderedEntries }
 }
 

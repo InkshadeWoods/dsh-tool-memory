@@ -288,7 +288,9 @@ export async function searchRecallIndexed(
   const precomputedVectors = options.precomputedVectors
   if (precomputedVectors !== undefined && precomputedVectors.length === items.length) {
     try {
-      const [queryEmbedding] = await embed([trimmed], { ...options.embeddingOptions, timeoutMs: options.embedTimeoutMs ?? 1800 })
+      // 主路径：向量已在 RAM 中，只需 embed query 一条。同样放宽兜底超时，
+      // 避免个别慢请求让语义通道整轮回落到无 cosine 状态。
+      const [queryEmbedding] = await embed([trimmed], { ...options.embeddingOptions, timeoutMs: options.embedTimeoutMs ?? 30_000 })
       const queryVector = Float32Array.from(queryEmbedding ?? [])
       precomputedVectors.forEach((vector, index) => {
         const score = cosine(queryVector, vector)
@@ -305,7 +307,11 @@ export async function searchRecallIndexed(
       })
       if (semanticItems.length > 0) {
         const texts = [trimmed, ...semanticItems.map(({ item }) => [item.summary ?? '', item.content].filter(Boolean).join('\n'))]
-        const vectors = await embed(texts, { ...options.embeddingOptions, timeoutMs: options.embedTimeoutMs ?? 1800 })
+        // 兜底路径：warmup 尚未完成时把 query 与最多 semanticCap 条候选一次性
+        // embed。调用方（index.ts）不传 embedTimeoutMs，原兜底 1800ms 对远程
+        // embedding 服务实测不足（41 条约 >1.8s 即被 abort，且 catch 静默吞掉，
+        // 表现为所有命中 cosine 为 null）。30s 覆盖 40 条候选并留 4 倍余量。
+        const vectors = await embed(texts, { ...options.embeddingOptions, timeoutMs: options.embedTimeoutMs ?? 30_000 })
         const queryVector = Float32Array.from(vectors[0] ?? [])
         semanticItems.forEach(({ itemIndex }, offset) => {
           const score = cosine(queryVector, Float32Array.from(vectors[offset + 1] ?? []))

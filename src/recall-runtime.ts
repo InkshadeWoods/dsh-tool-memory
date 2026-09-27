@@ -22,6 +22,11 @@ export interface RecallRuntimeInput {
   memoryEntries: readonly string[]
   query: string
   sessionId?: string
+  /**
+   * 召回并返回给渲染层的条数上限（语义是上限，不是固定条数）。不传用
+   * DEFAULT_CANDIDATE_K；运行时还会被当前动态池实际条目数夹取——池里只有
+   * 5 条时不可能返回 6 条。
+   */
   candidateK?: number
   embeddingEnabled?: boolean
   embeddingOptions?: EmbedOptions
@@ -43,6 +48,8 @@ export interface RecallRuntimeStatus {
   fingerprint?: string
   coreEntries: number
   dynamicEntries: number
+  /** 两份记忆文件的 § 总数，即召回条数的最外层硬顶。 */
+  totalEntries: number
   vectorState: 'idle' | 'warming' | 'ready'
 }
 
@@ -50,6 +57,11 @@ interface CachedRecallIndex {
   fingerprint: string
   coreEntries: MemoryEntry[]
   dynamicEntries: MemoryEntry[]
+  /**
+   * 两份记忆文件的 § 条目总数（USER.md + MEMORY.md，含常驻核心与动态池）。
+   * 这是召回条数的最外层硬顶：召回数永远不可能超过记忆总数本身。
+   */
+  totalEntries: number
   index: RecallIndex
   vectors?: Float32Array[]
   vectorWarmup?: Promise<void>
@@ -84,8 +96,17 @@ export class RecallRuntime {
     this.ensureVectorWarmup(current, embeddingEnabled, input.embeddingOptions)
     try {
       const recentKeys = input.sessionId ? new Set(this.recentEntriesBySession.get(input.sessionId) ?? []) : undefined
+      // 召回条数三层夹取，全部是「上限」而非固定值：
+      //   第 1 层（最外）两份记忆文件的 § 总数——召回数不可能超过记忆本身有多少条；
+      //   第 2 层（中间）用户配置的 recallTopK；
+      //   第 3 层（最内）本轮检索实际通过门控的候选数——有几条就返回几条，
+      //                  绝不为凑数硬填。searchRecallIndexed 本身就会按门控结果返回。
+      const requestedK = Math.max(1, Math.floor(input.candidateK ?? DEFAULT_CANDIDATE_K))
+      const hardCap = Math.max(1, current.totalEntries)
+      const poolCap = Math.max(1, current.dynamicEntries.length)
+      const effectiveK = Math.min(requestedK, hardCap, poolCap)
       const hits = await searchRecallIndexed(current.index, input.query, {
-        topK: Math.max(1, Math.min(20, input.candidateK ?? DEFAULT_CANDIDATE_K)),
+        topK: effectiveK,
         embedTimeoutMs: input.embedTimeoutMs,
         semanticCandidates: embeddingEnabled ? undefined : 0,
         precomputedVectors: embeddingEnabled ? current.vectors : undefined,
@@ -117,11 +138,12 @@ export class RecallRuntime {
 
   /** 供设置页显示不含内容、向量或密钥的运行时摘要。 */
   status(): RecallRuntimeStatus {
-    if (!this.cached) return { coreEntries: 0, dynamicEntries: 0, vectorState: 'idle' }
+    if (!this.cached) return { coreEntries: 0, dynamicEntries: 0, totalEntries: 0, vectorState: 'idle' }
     return {
       fingerprint: this.cached.fingerprint,
       coreEntries: this.cached.coreEntries.length,
       dynamicEntries: this.cached.dynamicEntries.length,
+      totalEntries: this.cached.totalEntries,
       vectorState: this.cached.vectors ? 'ready' : this.cached.vectorWarmup ? 'warming' : 'idle',
     }
   }
@@ -146,6 +168,8 @@ export class RecallRuntime {
       fingerprint,
       coreEntries,
       dynamicEntries,
+      // 最外层硬顶：两份文件的 § 总数，含被 core/dynamic 划分排除的条目。
+      totalEntries: parsedUser.length + parsedMemory.length,
       index: buildRecallIndex(dynamicEntries.map(asRecallSource)),
     }
     this.cached = next

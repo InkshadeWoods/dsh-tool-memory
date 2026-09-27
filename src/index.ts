@@ -32,14 +32,14 @@ import {
 } from './store.ts'
 import { renderRefresh, renderShow, renderWrite, text, type ShowStore } from './render.ts'
 import { ReviewScheduler, runReview } from './review.ts'
-import { Config } from './config.ts'
+import { loadConfig, type Config } from './config.ts'
 import { renderRecallContext } from './recall-render.ts'
 import { RecallRuntime } from './recall-runtime.ts'
 import { registerMemorySettingsRoutes } from './settings-routes.ts'
 import type {} from '@deepseek-ai/dsh-subagent' // 让 ctx.subagents 的类型增强进入编译作用域
 import type {} from '@deepseek-ai/dsh-agent' // 让 ctx.agents 的类型增强进入编译作用域
 
-export { Config } from './config.ts'
+export { Config, loadConfig } from './config.ts'
 
 export const name = 'memory'
 // 'subagents' 必须注入：评审要走 ctx.subagents 程序化拉起子代理（评审约束 1）；
@@ -78,9 +78,9 @@ function throwIfFailed(result: StoreResult): void {
 }
 
 export function apply(ctx: Context, rawConfig: Config) {
-  // 已安装 profile 可能来自旧版配置，缺少后续新增字段；入口统一通过 schema
-  // 补齐默认值，避免 host 路由或运行时因 undefined 失效。
-  const config = Config(rawConfig)
+  // 已安装 profile 可能来自旧版配置，缺少后续新增字段；入口统一补齐默认值，
+  // 并把用户在设置里手填的越界数值夹取到合法区间，避免 schema 抛错导致插件加载失败。
+  const config = loadConfig(rawConfig)
   const root = resolveRoot(config)
   const recallRuntime = new RecallRuntime()
   const store = new MemoryStore(root, {
@@ -130,6 +130,8 @@ export function apply(ctx: Context, rawConfig: Config) {
         memoryEntries: store.entriesFor('memory'),
         query,
         sessionId: agent.session.header.id,
+        // 条数上限；RecallRuntime 会再按当前动态池实际条目数夹取。
+        candidateK: config.recallTopK,
         embeddingEnabled: config.recallEmbeddingEnabled,
         embeddingOptions: {
           baseUrl: config.recallEmbeddingBaseUrl,
@@ -151,7 +153,7 @@ export function apply(ctx: Context, rawConfig: Config) {
 
       const context = createUserMessage({
         content: [{ type: 'text', text: rendered.text }],
-        source: { kind: 'plugin', plugin: 'memory-recall', form: 'recall' },
+        source: { kind: 'plugin:memory-recall', form: 'recall' } as any,
       })
       recallRuntime.recordInjectedEntries(agent.session.header.id, rendered.injectedEntries)
       return { kind: 'enter', messages: [...decision.messages, context] }

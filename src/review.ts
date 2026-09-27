@@ -99,9 +99,10 @@ function clip(text: string, limit = REVIEW_BODY_LIMIT): string {
  * 用户消息都仍是评审链路的既有输入；`form: recall` 防止同插件未来的其他消息误伤。
  */
 export function isMemoryRecallMessage(message: UserMessage): boolean {
-  return message.source.kind === 'plugin' &&
-    message.source.plugin === 'memory-recall' &&
-    message.source.form === 'recall'
+  const source = message.source as any
+  const isV4 = source?.kind === 'plugin:memory-recall'
+  const isV3 = source?.kind === 'plugin' && source?.plugin === 'memory-recall'
+  return (isV4 || isV3) && source?.form === 'recall'
 }
 
 function isReviewableEvent(event: SessionEvent): boolean {
@@ -224,7 +225,7 @@ function deliverReviewNotice(
   const message = createUserMessage({
     content: [{ type: 'text', text }],
     // form:'notice'：GUI 折叠展示的一行摘要（tool-jobs 同款，packages/jobs/tool-jobs/src/index.ts:281）。
-    source: { kind: 'plugin', plugin: 'memory', form: 'notice', summary },
+    source: { kind: 'plugin:memory', form: 'notice', summary } as any,
   })
   if (agent !== undefined) {
     // idle→followup 唤醒让用户立即看到；busy→inject 排队到当前回合的下一步。

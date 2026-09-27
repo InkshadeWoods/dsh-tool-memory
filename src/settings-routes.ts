@@ -16,7 +16,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { Config } from './config.ts'
+import { loadConfig, type Config } from './config.ts'
 import type { RecallRuntime } from './recall-runtime.ts'
 import type { MemoryStore, MemoryTarget } from './store.ts'
 
@@ -262,7 +262,7 @@ export function registerMemorySettingsRoutes(
       const { fingerprint, ...recallStatus } = recallRuntime.status()
       const modelRoutes = await availableModelRoutes(ctx)
       // 路由也独立归一化，防止热重载过渡期仍持有旧 shape 的 config。
-      const normalizedConfig = Config(config)
+      const normalizedConfig = loadConfig(config)
       const publicConfig = { ...normalizedConfig, recallEmbeddingApiKey: '' }
       writeJson(res, 200, {
         ok: true,
@@ -305,7 +305,9 @@ export function registerMemorySettingsRoutes(
       }
       let merged: Config
       try {
-        merged = Config(rawConfig as Config | null | undefined)
+        // 越界数值由 loadConfig 夹取，这里只拦截真正的结构性错误（类型不符、
+        // 未知枚举值等），避免用户在 GUI 手填 0 / 负数时被 400 挡住无法保存。
+        merged = loadConfig(rawConfig)
       } catch (error) {
         writeJson(res, 400, { ok: false, error: `配置校验失败：${error instanceof Error ? error.message : String(error)}` })
         return

@@ -67,16 +67,16 @@ window.__ModuleLoader__.load({
 
     const RECALL_BUDGET_FIELDS = [
       {
-        key: "recallTopK", label: "动态条目数", type: "number", min: 1, max: 6,
-        hint: "每轮最多渲染的相关记忆条数（1–6）",
+        key: "recallTopK", label: "召回条目数上限", type: "number", min: 1,
+        hint: "条数上限，不是固定条数。实际注入 = min(本值, 记忆文件总条数, 本轮门控通过数)，不硬凑；默认 6",
       },
       {
-        key: "recallMaxChars", label: "动态记忆总预算", type: "number", min: 200, max: 4000,
-        hint: "本轮相关记忆的总字符预算（200–4000）",
+        key: "recallMaxChars", label: "总字符上限", type: "number", min: 0,
+        hint: "0 = 不设上限（默认，零截断）。填具体数值则按该预算截断",
       },
       {
-        key: "recallPerItemChars", label: "单条记忆预算", type: "number", min: 80, max: 1200, wide: true,
-        hint: "每条相关记忆的最大字符数（80–1200）",
+        key: "recallPerItemChars", label: "单条字符上限", type: "number", min: 0, wide: true,
+        hint: "0 = 不设上限（默认，单条零截断）。填具体数值则按该值截断单条",
       },
     ];
 
@@ -97,16 +97,19 @@ window.__ModuleLoader__.load({
 
     const RECALL_PRESETS = [
       {
-        id: "balanced", title: "推荐 · 均衡", values: { recallTopK: 3, recallMaxChars: 1600, recallPerItemChars: 800 },
-        description: "已验证配置，适合大多数技术任务。",
+        id: "unlimited", title: "推荐 · 完整召回",
+        values: { recallTopK: 6, recallMaxChars: 0, recallPerItemChars: 0 },
+        description: "条数上限 6，字符不设上限；相关记忆完整注入，零截断。",
       },
       {
-        id: "compact", title: "紧凑", values: { recallTopK: 3, recallMaxChars: 1200, recallPerItemChars: 420 },
-        description: "更省上下文，适合短条目记忆。",
+        id: "wide", title: "更广",
+        values: { recallTopK: 12, recallMaxChars: 0, recallPerItemChars: 0 },
+        description: "条数上限 12，仍零截断；适合主题集中的长技术记忆。",
       },
       {
-        id: "expanded", title: "扩展", values: { recallTopK: 4, recallMaxChars: 2400, recallPerItemChars: 900 },
-        description: "保留更多长技术条目的细节。",
+        id: "tight", title: "省上下文",
+        values: { recallTopK: 6, recallMaxChars: 4000, recallPerItemChars: 1200 },
+        description: "限制字符预算；适合上下文紧张时使用。",
       },
     ];
 
@@ -440,9 +443,12 @@ window.__ModuleLoader__.load({
             ? "预热中"
             : "等待首轮召回";
       const selectedRecallPreset = RECALL_PRESETS.find((preset) => Object.keys(preset.values).every((key) => draft[key] === preset.values[key]));
+      // 0 = 不设上限；直接显示数字会让用户以为「预算是 0 字符」，必须译成「不限」。
+      const fmtChars = (n) => (Number(n) > 0 ? `${Number(n)} 字` : "不限");
+      const fmtPerItem = (n) => (Number(n) > 0 ? `每条 ${Number(n)} 字` : "单条不限");
       const recallRangeSummary = selectedRecallPreset
         ? selectedRecallPreset.title
-        : `${draft.recallTopK} 条 · ${draft.recallMaxChars} 字 · 每条 ${draft.recallPerItemChars} 字`;
+        : `最多 ${draft.recallTopK} 条 · 总预算 ${fmtChars(draft.recallMaxChars)} · ${fmtPerItem(draft.recallPerItemChars)}`;
       const reviewNotifyLabel = NOTIFY_OPTIONS.find((option) => option.value === draft.reviewNotify)?.label ?? "简短";
       const reviewSummary = draft.nudgeInterval === 0 ? "已关闭" : `每 ${draft.nudgeInterval} 条 · ${reviewNotifyLabel}`;
 
@@ -551,6 +557,7 @@ window.__ModuleLoader__.load({
                   h("span", null, "共享记忆尚未加载。首次提问时会自动从 MEMORY.md 与 USER.md 建立运行时索引；记忆文件本身不会丢失。"),
                 )
                 : [
+                  h("span", { key: "total", style: styles.statusChip("info") }, `记忆总数 ${recallStatus.totalEntries ?? 0} 条`),
                   h("span", { key: "dynamic", style: styles.statusChip("ok") }, `动态候选 ${recallStatus.dynamicEntries} 条`),
                   h("span", { key: "core", style: styles.statusChip("info") }, `常驻核心 ${recallStatus.coreEntries} 条`),
                   h("span", { key: "vector", style: styles.statusChip(semanticIndexLabel === "已就绪" ? "ok" : "neutral") },
