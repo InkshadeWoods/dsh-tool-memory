@@ -7,8 +7,8 @@
 
 ## 兼容性
 
-- 实测兼容 **DSH `0.1.5-rc.2`**（`tools` / `systemPrompt` / `agents` / `subagents` / 会话事件 / `agent/pre-step` 全链路 API 核验通过；宿主判定见 `package.json` 的 `engines.dsh: ">=0.1.1-rc.2"`）。
-- 依赖锚定 `@deepseek-ai/* 0.1.0-rc.6`：本插件只使用 DSH 最稳定的 API 子集，因此同一份产物可同时兼容旧版宿主与 `0.1.5-rc.2`。
+- 实测兼容 **DSH `0.1.7-rc.2`**（`tools` / `systemPrompt` / `agents` / `subagents` / 会话事件 / `agent/pre-step` 全链路 API 核验通过；宿主判定见 `package.json` 的 `engines.dsh: ">=0.1.1-rc.2"`）。
+- 依赖锚定 `@deepseek-ai/* 0.1.0-rc.6`：本插件只使用 DSH 最稳定的 API 子集，因此同一份产物可同时兼容旧版宿主与 `0.1.7-rc.2`。
 
 ## 记忆机制（与 Hermes 对齐）
 
@@ -129,9 +129,9 @@ dsh plugin add dsh-tool-memory
     reviewModel: ''                 # 评审子代理的 LLM model；留空=主 agent 的
     reviewNotify: 'on'              # 评审完成通知：off / on / verbose
     injectionMode: 'snapshot'       # snapshot=传统冻结快照（默认）；recall=智能动态召回
-    recallTopK: 3                   # recall 最多注入的动态记忆条数（1–6）
-    recallMaxChars: 1200            # recall 动态记忆总字符预算（200–4000）
-    recallPerItemChars: 420         # recall 单条动态记忆预算（80–1200）
+    recallTopK: 6                   # recall 召回条数上限（不是固定条数）
+    recallMaxChars: 0               # recall 动态记忆总字符上限；0=不设上限（默认）
+    recallPerItemChars: 0           # recall 单条记忆字符上限；0=不设上限（默认）
     recallEmbeddingEnabled: false   # 可选语义增强；默认关闭，不主动发起网络请求
     recallEmbeddingBaseUrl: 'https://api-inference.modelscope.cn/v1' # OpenAI 兼容 embedding API 根地址
     recallEmbeddingApiKey: ''       # 本机 profile 保存的 API Key；不要提交或共享此配置文件
@@ -143,10 +143,38 @@ dsh plugin add dsh-tool-memory
 选择 `injectionMode: 'recall'` 后，插件会在每个真实用户请求的首次模型 step 中重新读取两份共享文件：
 
 - `USER.md` 中同时标记为 `always / permanent / active / global` 的合法核心条目会常驻；
-- 其余有效条目经词法、内存 BM25、短语/标签和 RRF 选择，未通过强证据门控时不注入任何动态记忆；
+- 其余有效条目经词法、内存 BM25、短语/标签和语义向量四通道检索，加权 RRF 融合后过强证据门控，未通过时**不注入任何动态记忆**；
 - `never`、`superseded`、`archived` 或已过 `valid_until` 的条目不会参与；
-- 结果受条数和字符预算限制，历史威胁条目会显示屏蔽占位符；
+- 重复内容按条目键、正文全等、正文 Jaccard 近似度三道内容级去重；
+- 历史威胁条目会显示屏蔽占位符；
 - 可选 embedding 语义增强默认关闭。设置页可填写 OpenAI 兼容的 Base URL、API Key 与模型名；API Key 只保存在本机 profile 配置中，状态 API、运行状态和日志均不返回该值。缺少密钥、超时或服务失败均会自动回退到本地检索；不创建向量数据库或其他持久化索引。
+
+#### 条数语义（三层夹取）
+
+`recallTopK` 是**条数上限**，不是固定条数。实际注入数由三层取最小值决定：
+
+```
+第 1 层（最外）  两份记忆文件的 § 条目总数 —— 召回数不可能超过记忆本身有多少条
+第 2 层（中间）  用户设置的 recallTopK
+第 3 层（最内）  本轮检索实际通过门控的条数 —— 有 4 条就 4 条，有 3 条就 3 条，不硬凑
+```
+
+例如 `recallTopK = 12`，但本轮只有 3 条通过门控，就注入 3 条；池子里总共只有 8 条相关记忆，就注入 8 条。第三层保证「宁缺毋滥」——不会为了填满上限而注入不相关的记忆。
+
+设置页状态栏会显示当前的「记忆总数」，即第一层的具体数值。
+
+#### 字符上限
+
+| 字段 | 默认 | 含义 |
+| --- | --- | --- |
+| `recallMaxChars` | `0` | 动态记忆**总**字符上限。`0` = 不设上限（默认行为，零截断）；填具体数值则按该预算截断 |
+| `recallPerItemChars` | `0` | **单条**记忆字符上限。`0` = 不设上限（默认行为，单条零截断）；填具体数值则按该值截断单条 |
+
+两个字段完全独立，可任意组合（例如「总预算 4000 + 单条不限」或「总预算不限 + 单条 1200」）。
+
+预算内优先装入能完整放下的条目，只有装完完整条目后仍有富余，才会把零头用于截断第一条未装入的条目。
+
+在设置页手填越界值（0 / 负数 / 小数）不会导致插件加载失败，会按最接近的合法值运行。
 
 动态上下文以 `memory-recall` 插件来源标记，后台记忆评审会自动排除它，不会把注入文本再次沉淀为记忆。
 
@@ -180,9 +208,14 @@ codex CLI 已装 ~/.local/bin/codex(v0.147.0)，登录态有效
    会被自动转义为 `{​{`（零宽空格分隔），保证装配永不被打断。
 4. **威胁扫描**：移植 Hermes strict 作用域模式（注入/越狱/回连/外传/后门/硬编码密钥）
    并补了 3 条保守的中文模式；命中即拒写；历史毒条目在快照中替换为
-   `[BLOCKED: …]` 占位符，原文保留在文件里供检查删除。
+   `[BLOCKED: <文件> 条目包含威胁模式]` 占位符，原文保留在文件里供检查删除。
 5. **每回合合并失败上限**（Hermes issue #42405 的循环保护）未移植——
    DSH 工具调用模型侧自带预算约束；成功响应保持终态防抖。
+6. **消息 source 标记的双版本兼容**：0.1.7 把 `message.source` 的形状从
+   `{ kind: 'plugin', plugin: '<name>' }` 合成成了单字符串
+   `{ kind: 'plugin:<name>' }`。本插件的动态召回上下文与后台通知都带
+   source 标记（`form: 'recall'` / `'notice'`），因此识别时同时接受两种
+   形状——同一份产物在旧版宿主与 0.1.7 上行为一致，无需为宿主版本分叉。
 
 ## 开发与测试
 
@@ -198,6 +231,21 @@ pnpm build       # tsdown → lib/
 `session/created` 与 `memory_refresh` 重建快照）、`{{变量}}` 转义、
 后台评审（计数触发、取模对齐、纯工具回合不计入、并发防抖、对话打包格式、
 子代理 toolFilter 白名单与提示词、通知三档、provider/agent 缺失降级）。
+
+动态召回的验证要点（除单元测试外，另以真实记忆文件做端到端核验）：
+
+- **三层条数夹取**：`recallTopK` 是上限而非固定值，实际注入 =
+  `min(记忆文件总条数, recallTopK, 本轮门控通过数)`；门控只过 2 条时注入 2 条，
+  不为填满上限而硬凑。
+- **零截断**：默认 `recallMaxChars = 0` / `recallPerItemChars = 0` 时，注入的
+  条目保留完整正文，不因预算被截断（条目正文自带的 `…` 不属于截断）。
+- **两阶段装入**：设了总预算时，阶段一只装入能完整放下的条目，长条目不提前
+  截断，因而不挤掉短条目；剩余零头才在阶段二用于截断第一条未装入的条目。
+- **配置夹取**：在设置页手填 0 / 负数 / 小数不会让插件加载失败，按最接近的
+  合法值运行（`recallTopK` 最小 1，两个字符字段最小 0）。
+- **kind 限流已移除**：去重只保留条目键、正文全等、正文 Jaccard 近似度三道
+  内容级判据——kind 来自条目元数据，缺元数据的旧格式条目会落到 `unknown`，
+  在不可靠字段上设限会把同主题不同侧面的事实一起挡掉。
 
 ## License
 
