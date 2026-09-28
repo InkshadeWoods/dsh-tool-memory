@@ -11,7 +11,11 @@ import { isDynamicEntry, isUserCoreEntry, parseMemoryEntries, type MemoryEntry }
 import { buildRecallIndex, searchRecallIndexed, type RecallHit, type RecallIndex, type RecallSourceItem } from './retrieval.ts'
 
 const VECTOR_BATCH_SIZE = 16
-const VECTOR_TIMEOUT_MS = 6000
+// 预热是纯后台路径（recall-runtime.ts 的 buildVectors，失败静默降级），
+// 不阻塞任何调用方；但本地 embedding 后端（LM Studio JIT）冷启动需要
+// 加载模型 3-8 秒，TTL 卸载后再次命中同样要走一遍冷启动。与主路径
+// （retrieval.ts 的 embedTimeoutMs ?? 30_000）对齐，避免预热反复超时。
+const VECTOR_TIMEOUT_MS = 30_000
 const DEFAULT_CANDIDATE_K = 12
 const RECENT_ENTRY_LIMIT = 8
 

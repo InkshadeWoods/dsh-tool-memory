@@ -132,10 +132,10 @@ dsh plugin add dsh-tool-memory
     recallTopK: 6                   # recall 召回条数上限（不是固定条数）
     recallMaxChars: 0               # recall 动态记忆总字符上限；0=不设上限（默认）
     recallPerItemChars: 0           # recall 单条记忆字符上限；0=不设上限（默认）
-    recallEmbeddingEnabled: false   # 可选语义增强；默认关闭，不主动发起网络请求
-    recallEmbeddingBaseUrl: 'https://api-inference.modelscope.cn/v1' # OpenAI 兼容 embedding API 根地址
-    recallEmbeddingApiKey: ''       # 本机 profile 保存的 API Key；不要提交或共享此配置文件
-    recallEmbeddingModel: 'Qwen/Qwen3-Embedding-8B' # 请求中的 embedding 模型标识
+    recallEmbeddingEnabled: false   # 可选语义增强；默认关闭，需在设置页手动开启
+    recallEmbeddingBaseUrl: 'http://127.0.0.1:1234/v1' # OpenAI 兼容 embedding API 根地址；默认本机 LM Studio，无需鉴权
+    recallEmbeddingApiKey: ''       # 仅远端端点需要；只保存在本机 profile，不要提交或共享此配置文件
+    recallEmbeddingModel: 'text-embedding-qwen3-embedding-0.6b' # 请求中的 embedding 模型标识
 ```
 
 ### 智能动态召回
@@ -147,7 +147,16 @@ dsh plugin add dsh-tool-memory
 - `never`、`superseded`、`archived` 或已过 `valid_until` 的条目不会参与；
 - 重复内容按条目键、正文全等、正文 Jaccard 近似度三道内容级去重；
 - 历史威胁条目会显示屏蔽占位符；
-- 可选 embedding 语义增强默认关闭。设置页可填写 OpenAI 兼容的 Base URL、API Key 与模型名；API Key 只保存在本机 profile 配置中，状态 API、运行状态和日志均不返回该值。缺少密钥、超时或服务失败均会自动回退到本地检索；不创建向量数据库或其他持久化索引。
+- 可选 embedding 语义增强默认关闭（`recallEmbeddingEnabled: false`），需在设置页手动开启。API Key 只保存在本机 profile 配置中，状态 API、运行状态和日志均不返回该值。缺少密钥、超时或服务失败均会自动回退到本地检索；不创建向量数据库或其他持久化索引。
+
+#### embedding 配置
+
+三个字段都以你在设置页或 `cordis.patch.yml` 里填的值为唯一来源，插件**不读取环境变量、也不读取 Hermes `.env`**，不存在隐式的密钥发现。
+
+- 默认指向本机 LM Studio（`http://127.0.0.1:1234/v1`），本地端点**不需要 Key，留空即可用**；
+- 改用远端服务时填对应 Base URL 与模型名，此时**必须填 API Key**；留空会直接降级为本地检索，不会静默连一个注定失败的地址。
+
+设置页状态栏的「Key 已配置」只反映远端场景——指向本机 LM Studio 时它恒为否，但语义通道照常工作。
 
 #### 条数语义（三层夹取）
 
@@ -230,7 +239,8 @@ pnpm build       # tsdown → lib/
 威胁拦截与快照屏蔽、读失败保护、冻结快照语义（中途写入不改 prompt、
 `session/created` 与 `memory_refresh` 重建快照）、`{{变量}}` 转义、
 后台评审（计数触发、取模对齐、纯工具回合不计入、并发防抖、对话打包格式、
-子代理 toolFilter 白名单与提示词、通知三档、provider/agent 缺失降级）。
+子代理 toolFilter 白名单与提示词、通知三档、provider/agent 缺失降级）、
+embedding 客户端的本地/远端判定与失败降级。
 
 动态召回的验证要点（除单元测试外，另以真实记忆文件做端到端核验）：
 

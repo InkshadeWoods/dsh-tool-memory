@@ -83,15 +83,15 @@ window.__ModuleLoader__.load({
     const EMBEDDING_FIELDS = [
       {
         key: "recallEmbeddingBaseUrl", label: "Embedding Base URL", type: "text", wide: true,
-        hint: "OpenAI 兼容 API 根地址；插件会自动追加 /embeddings。",
+        hint: "OpenAI 兼容 API 根地址，插件自动追加 /embeddings。默认本机 LM Studio (http://127.0.0.1:1234/v1)，无需鉴权。",
       },
       {
         key: "recallEmbeddingApiKey", label: "Embedding API Key", type: "password", wide: true,
-        hint: "保存到本机 profile；状态接口不会返回。",
+        hint: "仅远端端点需要；本地端点 (127.0.0.1/localhost) 留空即可。只保存到本机 profile，状态接口不返回。",
       },
       {
         key: "recallEmbeddingModel", label: "Embedding 模型", type: "text", wide: true,
-        hint: "请求中的 model 字段；默认 Qwen/Qwen3-Embedding-8B。",
+        hint: "请求中的 model 字段；默认 text-embedding-qwen3-embedding-0.6b。",
       },
     ];
 

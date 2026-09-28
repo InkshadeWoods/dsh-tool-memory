@@ -42,7 +42,7 @@ export interface Config {
   recallEmbeddingBaseUrl: string
   /** 仅存于本机 profile 的 embedding API Key；状态接口永不回传。 */
   recallEmbeddingApiKey: string
-  /** embedding 模型标识；默认与既有 ModelScope 实现一致。 */
+  /** embedding 模型标识；默认与本机 LM Studio 常用模型一致。 */
   recallEmbeddingModel: string
 }
 
@@ -62,9 +62,12 @@ export const Config: Schema<Config> = Schema.object({
   // 单条字符预算：默认 0=不设上限（零截断）；用户可填具体数值收紧。
   recallPerItemChars: Schema.number().default(0).min(0),
   recallEmbeddingEnabled: Schema.boolean().default(false),
-  recallEmbeddingBaseUrl: Schema.string().default('https://api-inference.modelscope.cn/v1'),
+  // 默认指向本机 LM Studio（无需鉴权），与 embedder.ts 的
+  // DEFAULT_EMBEDDING_BASE_URL / DEFAULT_EMBEDDING_MODEL 逐字一致：
+  // schema 默认值若与 embedder 默认值分叉，用户清空配置后行为会突变。
+  recallEmbeddingBaseUrl: Schema.string().default('http://127.0.0.1:1234/v1'),
   recallEmbeddingApiKey: Schema.string().default(''),
-  recallEmbeddingModel: Schema.string().default('Qwen/Qwen3-Embedding-8B'),
+  recallEmbeddingModel: Schema.string().default('text-embedding-qwen3-embedding-0.6b'),
 })
 
 /** recall 三个数值字段的合法区间；越界值在这里夹取而不是让 schema 抛错。 */
