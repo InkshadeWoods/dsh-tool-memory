@@ -12,7 +12,7 @@ import { CallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
-import { apply, Config } from '../src/index.ts'
+import { apply, loadConfig } from '../src/index.ts'
 import type { ShowStore } from '../src/render.ts'
 
 const testSignal = new AbortController().signal
@@ -42,7 +42,9 @@ beforeAll(async () => {
   ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
-  apply(ctx, Config({
+  // 走 loadConfig 而非 Config(...)：前者是生产路径（index.ts 内部就是调它），
+  // 且接受部分配置（返回补齐默认值的完整 Config），与宿主真实调用一致。
+  apply(ctx, loadConfig({
     root,
     memoryCharLimit: 2200,
     userCharLimit: 1375,

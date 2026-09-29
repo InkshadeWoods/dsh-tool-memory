@@ -12,5 +12,8 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src"]
+  // tests 一并纳入：否则 `npm run typecheck` 只查 src，测试侧的
+  // @ts-expect-error 承重断言（见 tests/recall-reachability.spec.ts）不生效，
+  // 类型门禁等于半开。2026-09-30 起生效。
+  "include": ["src", "tests"]
 }

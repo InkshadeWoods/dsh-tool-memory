@@ -161,7 +161,11 @@ describe('漂移保护', () => {
     expect(readFileSync(join(storeDir(store), 'MEMORY.md'), 'utf8')).toContain('自由格式备注')
   })
 
-  it('add（append-only）不触发漂移拦截，外部内容保留为一条', async () => {
+  // ⚠️ 用例名曾为「add（append-only）不触发漂移拦截」，与实际行为不符：
+  // 插件侧的 add **会**做漂移检测（store.ts 的 add 调 reloadTarget(target)，
+  // 未传 skipDrift —— 与 MCP 侧刻意不同，见下一条用例）。这里之所以通过，
+  // 是因为该外部内容本身**不构成漂移**（能 round-trip、单条未超限）。
+  it('add 遇到「能 round-trip 的外部追加」不拦截，外部内容保留为一条', async () => {
     const store = makeStore()
     await store.add('memory', '工具写入的条目')
     writeFileSync(join(storeDir(store), 'MEMORY.md'), '工具写入的条目\n\n# 外部备注', 'utf8')
@@ -172,6 +176,22 @@ describe('漂移保护', () => {
     reloaded.loadFromDisk()
     // 外部自由格式未被丢弃，作为一条整体保留；新条目追加在后
     expect(reloaded.entriesFor('memory')).toEqual(['工具写入的条目\n\n# 外部备注', '追加的条目'])
+  })
+
+  it('add 遇到**真实漂移**会拒绝并留 .bak（与 MCP 侧的刻意分叉）', async () => {
+    // MCP 侧的 add 传 skipDrift: true（理由是"追加不覆盖既有内容"），插件侧不传。
+    // 插件侧的理由：add 落盘同样会原子重写整个文件，若放行就会把外部自由格式
+    // **静默规范化**；拒绝则保住外部原文的字节级形态。插件行为更保守，非缺陷。
+    const store = makeStore({ memoryCharLimit: 50 })
+    await store.add('memory', '工具写入的条目')
+    // 外部写入单条超限的自由格式 → 构成真实漂移
+    writeFileSync(join(storeDir(store), 'MEMORY.md'), 'X'.repeat(120), 'utf8')
+
+    const result = await store.add('memory', '追加的条目')
+    expect(result.success).toBe(false)
+    expect(result.drift_backup).toBeTruthy()
+    // 外部原文保持原样，未被规范化
+    expect(readFileSync(join(storeDir(store), 'MEMORY.md'), 'utf8')).toBe('X'.repeat(120))
   })
 })
 

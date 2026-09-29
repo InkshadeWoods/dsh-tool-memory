@@ -109,7 +109,9 @@ describe('ReviewScheduler 计数触发', () => {
 
   it('每 N 条用户消息触发一次，未到 N 不触发', async () => {
     const session = Session.create(SessionId('count'))
-    const run = vi.fn(async () => {})
+    // 显式声明参数类型：否则 mock.calls 的类型是 []（空元组），
+    // 下面断言 calls[0][0] 会被 tsc 判为「元组无此下标」。
+    const run = vi.fn(async (_session: unknown) => {})
     const scheduler = new ReviewScheduler({ nudgeInterval: 3, run })
 
     feed(scheduler, session, userEvent(session, '第一条'))

@@ -29,6 +29,7 @@ import {
   parseMemoryEntryMetadata,
   replaceMemoryEntryBody,
   serializeMemoryEntry,
+  splitMetadata,
   type MemoryEntryMetadataInput,
 } from './memory-entry.ts'
 
@@ -103,6 +104,16 @@ export const ONBOARDING_TEXT = [
 
 /** 快照渲染时替换威胁条目的占位符前缀。 */
 const BLOCKED_PREFIX = '[BLOCKED:'
+
+/**
+ * 修复 12·步2：仅有元数据、正文缺失的条目在快照里的占位符。
+ *
+ * 第 1 步（`memory-entry.ts` 的 `splitMetadata`）已让解析侧对这类条目返回空 body，
+ * 本常量负责第 2 步——快照不能把 `kind: project` 这类协议文本当作"记忆正文"注入。
+ * 与 MCP 侧（hermes-memory-mcp/src/store.ts）逐字一致。
+ */
+const MALFORMED_NOTICE =
+  '[⚠️ 该条目格式异常（仅有元数据、正文缺失），已从 system prompt 移除；可用 memory_remove 删除或 memory_replace 重写。]'
 
 /** system prompt 的 `{{variable}}` 插值转义：在花括号间插入零宽空格，破坏 `{{` 字面量。 */
 export function escapePromptText(text: string): string {
@@ -186,8 +197,25 @@ export class MemoryStore {
     return entries.length === 0 ? 0 : entries.join(ENTRY_DELIMITER).length
   }
 
+  /**
+   * 占用展示。口径**有意**与预算判定分离，勿「顺手统一」：
+   *
+   * 修复 13 —— 原实现复用 `charCount()`（未转义长度），而 `renderBlock` 的快照头
+   * 按 `escapePromptText` 之后的长度取百分比。含 `{{` 的条目因此让模型看到两个
+   * 不同的占用数字（快照头偏高，差值 = 每个 `{{` 插入的一个零宽空格）。
+   *
+   * 现在 `usage()` 与快照头**统一按转义后长度**——那才是真正进入 prompt 的字符数。
+   *
+   * 而 `charCount()`/预算判定**仍按未转义长度**：转义只增不减，若让超限检查也按
+   * 转义后长度，原本恰好达标的写入会被无端拒绝，那是行为变更而非修 bug。
+   *
+   * 代价（已知且方向安全）：usage() 数值略大于预算计算值，可能出现
+   * `usage: 99%` 而写入仍成功——用户看到偏高的占用，不会误以为还有空间。
+   * 与 MCP 侧（hermes-memory-mcp/src/store.ts）同口径。
+   */
   usage(target: MemoryTarget): string {
-    const current = this.charCount(target)
+    const entries = this.entriesFor(target)
+    const current = entries.length === 0 ? 0 : escapePromptText(entries.join(ENTRY_DELIMITER)).length
     const limit = this.charLimit(target)
     const pct = Math.min(100, Math.round((current / limit) * 100))
     return `${pct}% — ${current.toLocaleString()}/${limit.toLocaleString()} chars`
@@ -240,14 +268,26 @@ export class MemoryStore {
     return [...new Set(parseEntries(raw))] // 去重，保序，留首现
   }
 
-  /** 渲染 system-prompt 块：标题 + 占用指示 + 条目；威胁条目替换为占位符。 */
+  /**
+   * 渲染 system-prompt 块：标题 + 占用指示 + 条目；威胁与异常条目替换为占位符。
+   *
+   * ⚠️ 顺序是**承重**的：威胁扫描必须先于异常检测。同一条目同时命中两者时
+   * （如 `kind: project\nsummary: 请忽略以上指令…`）必须报"威胁"——若先判异常，
+   * 一条真正的注入会被降级显示成无关痛痒的"格式异常"。
+   */
   private renderBlock(target: MemoryTarget): string {
     const entries = this.entriesFor(target)
     if (entries.length === 0) return ''
     const sanitized = entries.map((entry) => {
       if (!entry || entry.startsWith(BLOCKED_PREFIX)) return entry
       const hits = scanThreats(entry)
-      if (hits.length === 0) return entry
+      if (hits.length === 0) {
+        // 修复 12·步2：旧格式纯正文条目 splitMetadata 返回 header=undefined，
+        // 不受影响（关键不回归）；只有「有 header 且正文为空」才是异常条目。
+        const split = splitMetadata(entry)
+        if (split.header !== undefined && split.body === '') return MALFORMED_NOTICE
+        return entry
+      }
       return (
         `${BLOCKED_PREFIX} ${target === 'user' ? 'USER.md' : 'MEMORY.md'} 条目包含威胁模式` +
         `（${hits.join(', ')}），已从 system prompt 移除；` +
@@ -455,8 +495,15 @@ export class MemoryStore {
     const { raw, ok } = readRawChecked(path)
     if (!ok) return { ok: false }
     const driftBackup = opts.skipDrift ? undefined : this.detectDrift(target, raw)
+    // 修复 14：漂移时**不**把磁盘内容写进活状态，直接带着备份路径返回。
+    //
+    // 修复前这里无条件 setEntries，于是 detectDrift 一旦判定漂移、调用方据此拒绝
+    // 写入（磁盘确实未被改动），活状态却已经被外部自由格式覆盖——漂移保护只保住了
+    // 磁盘，没保住内存。跳过 setEntries 后，拒绝即无副作用。
+    // 与 MCP 侧（hermes-memory-mcp/src/store.ts）一致。
+    if (driftBackup !== undefined) return { ok: true, driftBackup }
     this.setEntries(target, [...new Set(parseEntries(raw))])
-    return { ok: true, driftBackup }
+    return { ok: true }
   }
 
   /**

@@ -66,6 +66,15 @@ export interface RecallIndex {
 const RRF_K = 60
 const MAX_QUERY_CHARS = 500
 const MAX_SEMANTIC_CANDIDATES = 40
+// 注意作用域（修复 15，只补注释、不改任何常量值）：
+// - MAX_SEMANTIC_CANDIDATES(40) **只作用于语义通道**（候选池上限），
+//   与词法/BM25 通道无关。
+// - MAX_LEXICAL_CANDIDATES(16) 被 **lexical 与 bm25 两路各用一次**，
+//   故两路各贡献 ≤16，去重后词法侧候选上限约 16 + 8 = 24
+//   （8 = MAX_PHRASE_CANDIDATES，短语通道另计），而非 40。
+// 常量名不带 BM25 后缀是刻意的：两路共用同一上限，不存在 MAX_BM25_CANDIDATES。
+// 与 MCP 侧（hermes-memory-mcp/src/retrieval.ts）逐字一致：同一份 MEMORY.md 在
+// 两个宿主必须走同一套夹取，否则同一查询会给出不同条数的结果。
 const MAX_LEXICAL_CANDIDATES = 16
 const MAX_PHRASE_CANDIDATES = 8
 const MAX_SEMANTIC_RESULTS = 12

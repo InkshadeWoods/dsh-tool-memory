@@ -7,8 +7,9 @@
 
 ## 兼容性
 
-- 实测兼容 **DSH `0.1.7-rc.2`**（`tools` / `systemPrompt` / `agents` / `subagents` / 会话事件 / `agent/pre-step` 全链路 API 核验通过；宿主判定见 `package.json` 的 `engines.dsh: ">=0.1.1-rc.2"`）。
-- 依赖锚定 `@deepseek-ai/* 0.1.0-rc.6`：本插件只使用 DSH 最稳定的 API 子集，因此同一份产物可同时兼容旧版宿主与 `0.1.7-rc.2`。
+- 实测兼容 **DSH `0.2.0-rc.2`**（当前宿主；`tools` / `systemPrompt` / `agents` / `subagents` / 会话事件 / `agent/pre-step` 全链路 API 核验通过；宿主判定见 `package.json` 的 `engines.dsh: ">=0.1.1-rc.2"`）。
+- `peerDependencies` 的 `@deepseek-ai/dsh-*` 采用**开下界** `>=0.1.0-rc.5`（而非 caret）：caret `^0.1.0-rc.5` 生成的上界是 `<0.2.0-0`，会把 `0.2.0` 的全部预发布排除在门禁之外——宿主升到 `0.2.0-rc.2` 后插件会被拒载（表现为 `failed to import`）。开下界无上界即可零豁免通过门禁。
+- 依赖锚定 `@deepseek-ai/* 0.1.0-rc.6`：本插件只使用 DSH 最稳定的 API 子集，因此同一份产物可同时兼容旧版宿主与 `0.2.0-rc.2`。
 
 ## 记忆机制（与 Hermes 对齐）
 

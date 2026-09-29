@@ -51,8 +51,31 @@ const PATTERNS: Pattern[] = [
   { id: 'context_exfil', re: new RegExp(`(include|output|print|share)\\s+${FILLER}(conversation|chat\\s+history|previous\\s+messages|full\\s+context|entire\\s+context)`, 'i') },
 
   // ── 后门 / 持久化 ──────────────────────────────────────────────
-  { id: 'ssh_backdoor', re: /authorized_keys/i },
-  { id: 'ssh_access', re: /\$HOME\/\.ssh|~\/\.ssh/ },
+  // 修复 2：原为裸词 /authorized_keys/i，任何提及该文件名的正常运维笔记
+  // （如「authorized_keys 权限保持 600」）都误报。改为锚定「写入动作 + 目标」，
+  // 只降误报、不降漏报。动词覆盖中英与 shell 重定向；中文条目必须保留命中
+  // （如「把公钥写入 authorized_keys」里的「写入」是真正的写动作）。
+  // 与 MCP 侧（hermes-memory-mcp/src/threat.ts）的模式逐字一致。
+  { id: 'ssh_backdoor', re: /(write|wrote|append|appending|add|insert|inject|echo|cat|tee|写入|追加|添加|添加公钥|公钥写入|cat\s*>|>>)\s*[^\n]{0,2048}authorized_keys|authorized_keys[^\n]{0,64}(写入|追加|添加|添加公钥|append|add|write)/i },
+  // 修复 2 的同类收紧（用户许可的范围外扩展）：原为 /\$HOME\/\.ssh|~\/\.ssh/，
+  // 即「只要提到 ~/.ssh 就命中」。实测三条正常运维表述全部误报
+  // （「~/.ssh 的权限应为 700」「ssh-keygen 会生成到 ~/.ssh/」
+  // 「检查了一下 ~/.ssh/authorized_keys 没有异常条目」），且判据本身
+  // 不区分私钥与公钥/目录，真实风险反而可能漏检。
+  //
+  // 改为锚定「读写/外传动作 + 私钥文件名」（id_rsa/id_dsa/id_ecdsa/
+  // id_ed25519/identity，且用 (?![\\w.]) 排除 .pub 公钥）。反向模式
+  // （文件名在前、动作在后）覆盖中文「内容/发给我/回显」等无前置动词的写法。
+  // 与 MCP 侧（hermes-memory-mcp/src/threat.ts 的 ssh_access，其注释标为
+  // 「修复 13」，注意与 store.ts 的修复 13 不是同一项）逐字一致。
+  {
+    id: 'ssh_access',
+    re: new RegExp(
+      '(?:cat|less|more|head|tail|strings|xxd|od|dd|read|reads|reading|print|prints|output|outputs|show|shows|display|dump|dumps|copy|copies|cp|mv|rsync|tar|zip|base64|send|sends|sending|upload|uploads|steal|steals|stealing|grab|grabs|fetch|fetches|exfiltrate|echo|tee|scp|sftp|curl|wget|nc|读取|回显|输出|打印|发送|发给|上传|外发|泄露|贴出|导出|复制|备份)\\s*[^\\n]{0,2048}?\\.ssh/(?:id_rsa|id_dsa|id_ecdsa|id_ed25519|identity)(?![\\w.])' +
+        '|(?:\\.ssh/(?:id_rsa|id_dsa|id_ecdsa|id_ed25519|identity)(?![\\w.])[^\\n]{0,64}?(?:内容|发给我|发过来|回显|贴出|输出|导出|上传|外发|泄露|send|upload|print|output|leak|dump|steal|copy))',
+      'i',
+    ),
+  },
   { id: 'agent_config_mod', re: new RegExp(`(update|modify|edit|write|change|append|add\\s+to)\\s+[^\\n]{0,2048}(?:AGENTS\\.md|CLAUDE\\.md|\\.cursorrules|\\.clinerules)`, 'i') },
   { id: 'agent_config_mod_zh', re: /(修改|编辑|写入|追加|添加)(以上|之前)?(的)?(指令|规则|配置)/ },
 
@@ -77,8 +100,25 @@ export function scanThreats(content: string): string[] {
   return hits
 }
 
-/** 首个命中模式的错误文案；未命中返回 null。 */
+/**
+ * 首个命中模式的错误文案；未命中返回 null。超长内容拒绝写入。
+ *
+ * 修复 3：scanThreats 只扫前 MAX_SCAN_CHARS 字符（有意的性能保护，不移除）。
+ * 修复前这里直接用 scanThreats 的截断结果，导致「投毒词放在第 66000 字符」
+ * 可绕过扫描写入。现在改为**拒绝超长写入**而非静默截断后放行——无法完成扫描
+ * 就不放行。
+ *
+ * scanThreats 本身保持原样：它仍服务于快照渲染与召回过滤等**只读**路径，
+ * 那里没有「写入规避」风险，截断只为耗时可控。
+ */
 export function firstThreatMessage(content: string): string | null {
+  // 超长内容无法完成威胁扫描：拒绝而非静默截断，杜绝窗口外绕过
+  if (content.length > MAX_SCAN_CHARS) {
+    return (
+      `内容长度 ${content.length} 字符，超过单条扫描上限 ${MAX_SCAN_CHARS} 字符，已拒绝写入。` +
+      '超长内容无法完成威胁扫描；请拆分为多条后重试。'
+    )
+  }
   const hits = scanThreats(content)
   if (hits.length === 0) return null
   return (

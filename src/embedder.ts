@@ -43,7 +43,21 @@ export interface EmbedOptions {
   model?: string
 }
 
-/** 批量转为向量；空输入、远端缺 key 或接口异常均抛错，由调用方安全降级。 */
+/**
+ * 批量转向量。
+ *
+ * **契约（修复 17：原文只写「空输入…抛错」，未说明空串会被静默过滤——而返回
+ * 向量数因此**不等于**入参数量，是与 MCP 侧对齐后补上的关键说明）**：
+ * - 输入中的空串/纯空白会被**过滤**，不抛错；因此**返回的向量数 = 过滤后
+ *   的数量**，调用方**不可**按原始 `texts` 下标去对应结果——需要保位时请
+ *   自行先 trim/校验，或改用下标映射。
+ * - 过滤后为空（即全部为空白）→ 抛错。
+ * - 远端端点缺 key、接口异常、HTTP 非 2xx、返回结构不符 → 抛错。
+ *
+ * 调用方消化后降级：`retrieval.ts` 与 `recall-runtime.ts` 都在 try/catch 内调用，
+ * 失败即静默放弃语义通道、退回纯本地检索。
+ * 与 MCP 侧（hermes-memory-mcp/src/embedder.ts）契约一致。
+ */
 export async function embed(texts: string[], options: EmbedOptions = {}): Promise<number[][]> {
   const baseUrl = (options.baseUrl?.trim() || DEFAULT_EMBEDDING_BASE_URL).replace(/\/+$/, '')
   const key = options.apiKey?.trim()
@@ -67,9 +81,14 @@ export async function embed(texts: string[], options: EmbedOptions = {}): Promis
     })
     if (!response.ok) throw new Error(`embeddings HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`)
 
-    const payload = (await response.json()) as { data?: Array<{ embedding?: number[] }> }
-    const vectors = payload.data?.map(item => item.embedding ?? [])
-    if (vectors === undefined || vectors.length !== input.length || vectors.some(vector => vector.length === 0)) {
+    // 修复 16：`payload.data?.map(...)` 的可选链只兜 null/undefined，`data` 是
+    // 字符串/数字/对象时 `.map` 不存在 → `TypeError: ... is not a function`，
+    // 把本应友好的「返回结构异常」变成内部类型错误泄漏。先判数组再 map。
+    // 与 MCP 侧（hermes-memory-mcp/src/embedder.ts）一致。
+    const payload = (await response.json()) as { data?: unknown }
+    if (!Array.isArray(payload.data)) throw new Error('embeddings 返回结构异常')
+    const vectors = payload.data.map(item => (item as { embedding?: number[] } | null)?.embedding ?? [])
+    if (vectors.length !== input.length || vectors.some(vector => vector.length === 0)) {
       throw new Error('embeddings 返回结构异常')
     }
     return vectors
